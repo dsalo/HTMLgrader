@@ -22,13 +22,11 @@ KNOWN BUGS:
 
 # note to self: 
 #	pip3 install bs4
-#	pip3 install cssutils
 #	pip3 install tidylib (AND MAKE SURE you have the CURRENT Tidy installed)
-#	pip3 install capturer
-import glob, os, sys, shutil, html, re, string, zipfile, argparse, cssutils
+#	pip3 install tinycss2
+import glob, os, sys, shutil, html, re, string, zipfile, argparse, tinycss2
 from bs4 import BeautifulSoup as bs
 from tidylib import tidy_document
-from capturer import CaptureOutput
 
 def main():
 	parser = argparse.ArgumentParser()
@@ -104,11 +102,11 @@ def grade_zip(inputfile):
 	for file in sitefiles:
 		filename, ext = os.path.splitext(file)
 
-		if ext.lower() == ".html" or ext.lower() == ".htm": 
+		if ext.lower() == ".html" or ext.lower() == ".htm":
 			htmlfiles.append(file)
 		elif ext.lower() == ".css": 
 			cssfiles.append(file)
-		elif ext.lower() in imageexts: 
+		elif ext.lower() in imageexts:
 			imagefiles.append(file)
 	print("\tSitefiles sorted.")
 			
@@ -168,8 +166,8 @@ def grade_zip(inputfile):
 			check = check_css(zipobj.read(cssfile))
 			print("\tCSS file %s read." % (cssfile))
 			if check.strip():
-				grading_result = grading_result + "\n\t" + cssfile + " CSS errors:" + check
-			print("\tCSS file %s graded." % (cssfile))
+				grading_result = grading_result + "\n\n\t" + cssfile + " CSS errors:" + check
+		print("\tCSS files graded.")
 			
 	print("Graded %s" % (inputfile))
 	
@@ -293,67 +291,56 @@ def check_htmlfile(soup, htmlfiles, imagefiles, cssfiles):
 	return result
 
 def check_css(filestream):
-	print("\tFilestream acquired; CSS check starting.")
 	result = ''
 	#did they change the margin on <body>?
 	marginpresent = 0
 	#did they change the background color on <body>?
 	backgroundchanged = 0
-	#did they change the heading font to sans-serif?
-	headingfont = 0
+	#did they change something to serif, something else to sans-serif?
+	serif = 0
+	sansserif = 0
+
+	css, encoding = tinycss2.parse_stylesheet_bytes(filestream, skip_comments=1, skip_whitespace=1)
+	# A list of QualifiedRule, AtRule, Comment (if skip_comments is false), 
+	# WhitespaceToken (if skip_whitespace is false), and ParseError objects.
 	
-	#irritatingly, cssutils writes syntax error messages to stderr
-	#and provides no way to redirect them anywhere
-	#so I'm doing it this way
-	capturer = CaptureOutput()
-	print("\tCaptureOutput done.")
-	capturer.start_capture()
-	print("\tCSS file capture started.")
+	allselectors = []
+	allproperties = [] 
 	
-	try:
-		css = cssutils.parseString(filestream, validate=1)
-	except UnicodeDecodeError: #what the hell are the little darlings even doing?
-		print("\tUnicodeDecodeError detected.")
-		result = result + "\n\tCSS file has a non-Unicode character in it, causing the checker to break; check manually."
-		return result #just bail out
-	else:	
-		print("\tNo Unicode errors. Continuing...")
-		for rule in css.cssRules:
-			if not rule.wellformed: result = result + "\n\tCheck CSS file for syntax errors."
-		
-			if not rule.type == rule.STYLE_RULE: continue
-			else:
-				if rule.selectorText.find('body') > -1: #equivalence doesn't work because multiple selectors possible
-					for property in rule.style:
-						if property.name.find('margin') > -1: #they set margins on <body> as requested
-							marginpresent = 1
-						elif property.name == "background-color": #also background-color
-							backgroundchanged = 1
-						elif property.name == "font-family": #font-family needs to be serif
-							fontstring = property.value
-							if fontstring.find(' serif') == -1 and fontstring.find(',serif') == -1:
-								#they're supposed to use a serif fallback, but they're okay
-								#if they just set a serif font, so this needs a manual check.
-								result = result + "\n\tSite font has no serif fallback; check it."							
-				elif rule.selectorText.lower().find('h1') > -1 or rule.selectorText.lower().find('h2') > -1:
-					for property in rule.style:
-						headingfont = property.value
-						if headingfont.find('sans-serif') > -1:
-							headingfont = 1
+	parseerrors = [x for x in css if x.type == 'error']
+	for error in parseerrors:
+		result = result + "\n\tCSS parsing error line %s: %s" % (error.source_line, error.message)
+	qualrules = [x for x in css if x.type == 'qualified-rule']
+
+	for qualrule in qualrules:
+		#node.prelude and node.content are both lists of objects
+		#kill the useless whitespace nodes out of them
+		try: selectors = [x for x in qualrule.prelude if x.type != 'whitespace']
+		except ValueError: selectors = qualrule.prelude
+		try: rules = [x for x in qualrule.content if x.type != 'whitespace']
+		except ValueError: rules = qualrule.content
+		for rule in rules:
+			if rule.type == 'function' or rule.type == 'literal': continue
+			if rule.value not in allproperties: allproperties.append(rule.value)
+		for selector in selectors:
+			if selector.type != 'ident': continue
+			if selector.value not in allselectors: allselectors.append(selector.value)
+
+		for selector in selectors:
+			if selector.type == 'ident':
+				if selector.value == 'body' or selector.value == 'html':
+					for rule in rules:
+						if rule.type == 'ident':
+							#either margin or padding is okay; slice means they're okay if they used margin-top etc.
+							if rule.value[0:6] == 'margin' or rule.value[0:7] == 'padding': marginpresent = 1
+							if rule.value[0:10] == 'background': backgroundchanged = 1
 	
-		print("\tCSS validation complete.")
-		if not marginpresent: result = result + "\n\tNo margin on <body>."	
-		if not backgroundchanged: result = result + "\n\tBackground color not changed."
-		if not headingfont: result = result + "\n\tHeading font not changed to sans-serif."
-	
-		#add errors from stderr, if any, to the result
-		capturer.finish_capture()
-		if capturer.get_text().strip():
-			for line in capturer.get_lines():
-				if line.strip(): result = result + "\n\t" + line
-			result = result + "\n"
-	
-		return result
+	if 'serif' not in allproperties: result = result + "\n\tNo font changed to serif anywhere."
+	if 'sans-serif' not in allproperties: result = result + "\n\tNo font changed to sans-serif anywhere."
+	print("\tCSS validation complete.")
+	if not marginpresent: result = result + "\n\tNo margin on <body>."	
+	if not backgroundchanged: result = result + "\n\tBackground color/image not changed."
+	return result
 
 def kill_dirs(filename):
 	#if they used a subfolder for images or CSS or anything,
